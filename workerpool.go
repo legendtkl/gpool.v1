@@ -14,6 +14,7 @@ type WorkerPool struct {
 	maxIdleTime     time.Duration
 	stop            chan struct{}
 	stopFlag        bool
+	objectPool      *sync.Pool
 }
 
 type Worker struct {
@@ -24,9 +25,16 @@ type Worker struct {
 func NewLimit(num int) (*WorkerPool, error) {
 	wp := &WorkerPool{
 		maxWorkerNumber: num,
-		maxIdleTime:     10 * time.Minute,
+		maxIdleTime:     1 * time.Minute,
+		objectPool: &sync.Pool{
+			New: func() interface{} {
+				return &Worker{
+					fn: make(chan func()),
+				}
+			},
+		},
 	}
-
+	wp.init()
 	return wp, nil
 }
 
@@ -36,29 +44,33 @@ func NewUnlimit() (*WorkerPool, error) {
 		maxIdleTime:     10 * time.Minute,
 	}
 
+	wp.init()
 	return wp, nil
 }
 
 func (wp *WorkerPool) init() {
-	tick := time.Tick(wp.maxIdleTime)
-
-	for {
-		select {
-		case <-tick:
-			wp.cleanup()
-		case <-wp.stop:
-			wp.stopPool()
-			break
+	go func() {
+		tick := time.Tick(wp.maxIdleTime)
+		for {
+			select {
+			case <-tick:
+				wp.cleanup()
+			case <-wp.stop:
+				wp.stopPool()
+				break
+			}
 		}
-	}
+	}()
 }
 
 func (wp *WorkerPool) cleanup() {
 	i := 0
 	now := time.Now().Unix()
 	for i = 0; i < len(wp.workers); i++ {
-		if time.Duration(now-wp.workers[i].lastUsedTime) < wp.maxIdleTime {
+		if time.Duration(now-wp.workers[i].lastUsedTime)*time.Second < wp.maxIdleTime {
 			break
+		} else {
+			close(wp.workers[i].fn)
 		}
 	}
 
