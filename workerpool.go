@@ -142,6 +142,7 @@ func (wp *WorkerPool) getWorker() *Worker {
 
 	wp.lock.Lock()
 	worker := wp.workers[len(wp.workers)-1]
+	wp.workers[len(wp.workers)-1] = nil
 	wp.workers = wp.workers[:len(wp.workers)-1]
 	wp.lock.Unlock()
 	return worker
