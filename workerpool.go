@@ -1,4 +1,4 @@
-package pool
+package gpool
 
 import (
 	"log"
@@ -6,26 +6,34 @@ import (
 	"time"
 )
 
+// WorkerPool define a worker pool
 type WorkerPool struct {
-	maxWorkerNumber int
-	workerNumber    int
-	workers         []*Worker
-	lock            sync.Mutex
-	maxIdleTime     time.Duration
-	stop            chan struct{}
-	stopFlag        bool
-	objectPool      *sync.Pool
+	maxWorkerNumber int           //the max worker number in the pool
+	workerNumber    int           //the worker number now in the pool
+	workers         []*Worker     //the available worker queue
+	lock            sync.Mutex    //for queue thread-safe
+	maxIdleTime     time.Duration //the recycle time. That means goroutine will be destroyed when it has not been used for maxIdleTime.
+	stop            chan struct{} //stop
+	stopFlag        bool          //trick
+	objectPool      *sync.Pool    //gc-friendly
 }
 
+//Worker run as a goroutine
 type Worker struct {
 	fn           chan func()
 	lastUsedTime int64
 }
 
-func NewLimit(num int) (*WorkerPool, error) {
+// NewLimt creates a worker pool
+//
+// maxWorkerNum define the max worker number in the pool. When the worker
+// number exceeds maxWorkerNum, we will ignore the job.
+// recycleTime(minute) define the time to recycle goroutine. When a goroutine has
+// not been used for recycleTime, it will be recycled.
+func NewLimit(maxWorkerNum, recycleTime int) (*WorkerPool, error) {
 	wp := &WorkerPool{
-		maxWorkerNumber: num,
-		maxIdleTime:     1 * time.Minute,
+		maxWorkerNumber: maxWorkerNum,
+		maxIdleTime:     time.Duration(recycleTime) * time.Minute,
 		objectPool: &sync.Pool{
 			New: func() interface{} {
 				return &Worker{
@@ -38,16 +46,20 @@ func NewLimit(num int) (*WorkerPool, error) {
 	return wp, nil
 }
 
-func NewUnlimit() (*WorkerPool, error) {
+// NewUnlimit creates a unlimited-number worker pool.
+func NewUnlimit(recycleTime int) (*WorkerPool, error) {
 	wp := &WorkerPool{
 		maxWorkerNumber: -1,
-		maxIdleTime:     10 * time.Minute,
+		maxIdleTime:     time.Duration(recycleTime) * time.Minute,
 	}
 
 	wp.init()
 	return wp, nil
 }
 
+// init initializes the workerpool.
+//
+// init func will be in charge of cleaning up goroutines and receiving the stop signal.
 func (wp *WorkerPool) init() {
 	go func() {
 		tick := time.Tick(wp.maxIdleTime)
@@ -63,6 +75,12 @@ func (wp *WorkerPool) init() {
 	}()
 }
 
+// Stop stop goroutine pool
+func (wp *WorkerPool) Stop() {
+	wp.stop <- struct{}{}
+}
+
+// cleanup cleans up the available worker queue.
 func (wp *WorkerPool) cleanup() {
 	i := 0
 	now := time.Now().Unix()
@@ -79,6 +97,7 @@ func (wp *WorkerPool) cleanup() {
 	wp.lock.Unlock()
 }
 
+// stopPool stops the worker pool.
 func (wp *WorkerPool) stopPool() {
 	wp.stopFlag = true
 
@@ -89,8 +108,11 @@ func (wp *WorkerPool) stopPool() {
 	wp.lock.Unlock()
 }
 
+// Queue assigns a worker for job (fn func(), with closure we can define every job in this form)
+//
+// If the worker pool is limited-number and the worker number has reached the limit, we prefer to discard the job.
 func (wp *WorkerPool) Queue(fn func()) {
-	worker := wp.GetWorker()
+	worker := wp.getWorker()
 	if worker == nil {
 		log.Print("get worker Failed")
 		return
@@ -98,7 +120,12 @@ func (wp *WorkerPool) Queue(fn func()) {
 	worker.fn <- fn
 }
 
-func (wp *WorkerPool) GetWorker() *Worker {
+// GetWorker select a worker.
+//
+// If the available worker queue is empty, we will new a worker.
+// else we will select the last worker, in this case, the worker queue
+// is like a FILO queue, and the select algorithm is kind of like LRU.
+func (wp *WorkerPool) getWorker() *Worker {
 	if len(wp.workers) == 0 {
 		wp.workerNumber++
 		if wp.maxWorkerNumber != -1 && wp.workerNumber > wp.maxWorkerNumber {
@@ -109,7 +136,7 @@ func (wp *WorkerPool) GetWorker() *Worker {
 		worker := &Worker{
 			fn: make(chan func()),
 		}
-		go wp.StartWorker(worker)
+		go wp.startWorker(worker)
 		return worker
 	}
 
@@ -120,7 +147,8 @@ func (wp *WorkerPool) GetWorker() *Worker {
 	return worker
 }
 
-func (wp *WorkerPool) StartWorker(worker *Worker) {
+// StartWorker starts a new goroutine.
+func (wp *WorkerPool) startWorker(worker *Worker) {
 	for f := range worker.fn {
 		if f == nil {
 			break
